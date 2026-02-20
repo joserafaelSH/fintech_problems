@@ -12,36 +12,6 @@ import (
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/logger"
 )
 
-func SaveTransaction(tx Transaction) {
-	insertSQL := `INSERT INTO transactions (id, account_id, amount, asset, created_at, status) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := database.DB.Exec(insertSQL, tx.ID, tx.AccountID, tx.Amount, tx.Asset, tx.CreatedAt, tx.Status)
-	if err != nil {
-		logger.Logger.Error("Failed to save transaction", "error", err)
-	}
-}
-
-func GetAllTransactions() ([]Transaction, error) {
-	rows, err := database.DB.Query("SELECT id, account_id, amount, asset, created_at, status FROM transactions")
-	if err != nil {
-		logger.Logger.Error("Failed to query transactions", "error", err)
-		return nil, err
-	}
-	defer rows.Close()
-
-	var transactions []Transaction
-	for rows.Next() {
-		var tx Transaction
-		err := rows.Scan(&tx.ID, &tx.AccountID, &tx.Amount, &tx.Asset, &tx.CreatedAt, &tx.Status)
-		if err != nil {
-			logger.Logger.Error("Failed to scan transaction row", "error", err)
-			continue
-		}
-		transactions = append(transactions, tx)
-	}
-
-	return transactions, nil
-}
-
 const (
 	NumWorkers        = 100
 	InputChannelSize  = 100
@@ -72,24 +42,62 @@ func ParseTransaction(data []byte) (Transaction, error) {
 }
 
 type ErrorChannel struct {
-	Transaction Transaction
+	Transaction *Transaction
 	Err         error
 }
 
 type TransactionProcessor struct {
 	NumWorkers int
-	InputChan  chan Transaction
-	ResultChan chan Transaction
-	ErrorChan  chan ErrorChannel
+	InputChan  chan *Transaction
+	ResultChan chan *Transaction
+	ErrorChan  chan *ErrorChannel
 	GlobalCtx  context.Context
 	Cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	listenerWg sync.WaitGroup
+	Db         *database.Database
 }
 
-func (t *Transaction) Process(r *rand.Rand) error {
-	// simulate processing time
-	time.Sleep(200 * time.Millisecond)
+func (tp *TransactionProcessor) SaveTransaction(ctx context.Context, tx *Transaction) error {
+	insertSQL := `INSERT INTO transactions (id, account_id, amount, asset, created_at, status) VALUES (?, ?, ?, ?, ?, ?)`
+	_, err := tp.Db.DB.ExecContext(ctx, insertSQL, tx.ID, tx.AccountID, tx.Amount, tx.Asset, tx.CreatedAt, tx.Status)
+	if err != nil {
+		logger.Logger.Error("Failed to save transaction", "error", err)
+		return err
+	}
+	return nil
+}
+
+func (tp *TransactionProcessor) GetAllTransactions(ctx context.Context) ([]Transaction, error) {
+	rows, err := tp.Db.DB.QueryContext(ctx, "SELECT id, account_id, amount, asset, created_at, status FROM transactions")
+	if err != nil {
+		logger.Logger.Error("Failed to query transactions", "error", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var transactions []Transaction
+	for rows.Next() {
+		var tx Transaction
+		err := rows.Scan(&tx.ID, &tx.AccountID, &tx.Amount, &tx.Asset, &tx.CreatedAt, &tx.Status)
+		if err != nil {
+			logger.Logger.Error("Failed to scan transaction row", "error", err)
+			continue
+		}
+		transactions = append(transactions, tx)
+	}
+
+	return transactions, nil
+}
+
+func (t *Transaction) Process(ctx context.Context, r *rand.Rand) error {
+
+	select {
+	case <-time.After(200 * time.Millisecond):
+	case <-ctx.Done():
+		logger.Logger.Info("Transaction processing cancelled", "transaction_id", t.ID)
+		return ctx.Err()
+	}
 
 	p := r.Float64()
 
@@ -108,33 +116,38 @@ func (t *Transaction) Process(r *rand.Rand) error {
 	}
 }
 
-func CreateTransactionProcessor(parent context.Context) *TransactionProcessor {
+func CreateTransactionProcessor(parent context.Context, db *database.Database) *TransactionProcessor {
 	ctx, cancel := context.WithCancel(parent)
 	return &TransactionProcessor{
 		NumWorkers: NumWorkers,
-		InputChan:  make(chan Transaction, InputChannelSize),
-		ResultChan: make(chan Transaction, ResultChannelSize),
-		ErrorChan:  make(chan ErrorChannel, ErrorChannelSize),
+		InputChan:  make(chan *Transaction, InputChannelSize),
+		ResultChan: make(chan *Transaction, ResultChannelSize),
+		ErrorChan:  make(chan *ErrorChannel, ErrorChannelSize),
 		GlobalCtx:  ctx,
 		Cancel:     cancel,
+		Db:         db,
 	}
 }
 
 func (tp *TransactionProcessor) resultListener() {
+	defer tp.listenerWg.Done()
 	for tx := range tp.ResultChan {
-		SaveTransaction(tx)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		tp.SaveTransaction(ctx, tx)
+		cancel()
 	}
 
 }
 
 func (tp *TransactionProcessor) errorListener() {
+	defer tp.listenerWg.Done()
 	for ec := range tp.ErrorChan {
 		logger.Logger.Error("Error processing transaction", "transaction_id", ec.Transaction.ID, "error", ec.Err)
 	}
 }
 
 func (tp *TransactionProcessor) worker(id int) {
-
+	r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
 	defer tp.wg.Done()
 	for {
 		select {
@@ -149,13 +162,13 @@ func (tp *TransactionProcessor) worker(id int) {
 				return
 			}
 
-			r := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
-			err := tx.Process(r)
+			ctx, cancel := context.WithTimeout(tp.GlobalCtx, 5*time.Second)
+			err := tx.Process(ctx, r)
+			cancel()
 			if err != nil {
-				select {
-				case tp.ErrorChan <- ErrorChannel{Transaction: tx, Err: err}:
-				default:
-				}
+
+				tp.ErrorChan <- &ErrorChannel{Transaction: tx, Err: err}
+
 			}
 
 			select {
@@ -165,7 +178,6 @@ func (tp *TransactionProcessor) worker(id int) {
 			case tp.ResultChan <- tx:
 				logger.Logger.Info("Worker processed transaction", "worker_id", id, "transaction_id", tx.ID)
 
-			default:
 			}
 
 		}
@@ -179,20 +191,14 @@ func (tp *TransactionProcessor) Start() {
 		go tp.worker(i)
 	}
 	tp.listenerWg.Add(2)
-
-	go func() {
-		tp.resultListener()
-	}()
-
-	go func() {
-		tp.errorListener()
-	}()
+	go tp.resultListener()
+	go tp.errorListener()
 }
 
 func (tp *TransactionProcessor) Close() {
-	tp.wg.Wait()
 	tp.Cancel()
 	close(tp.InputChan)
+	tp.wg.Wait()
 	close(tp.ResultChan)
 	close(tp.ErrorChan)
 	tp.listenerWg.Wait()

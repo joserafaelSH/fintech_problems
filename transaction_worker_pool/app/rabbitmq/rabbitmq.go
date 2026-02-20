@@ -3,6 +3,7 @@ package rabbitmq
 import (
 	"context"
 
+	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/database"
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/logger"
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/transaction"
 
@@ -12,20 +13,28 @@ import (
 type RabbitMQ struct {
 	conn      *amqp.Connection
 	chann     *amqp.Channel
+	queue     amqp.Queue
 	QueueName string
 }
 
-func failOnError(err error, msg string) {
-	if err != nil {
-		logger.Logger.Error("%s: %s", msg, err)
-	}
-}
+func CreateRabbitMQConnection() (*RabbitMQ, error) {
 
-func CreateRabbitMQConnection() *RabbitMQ {
+	rabbit := &RabbitMQ{QueueName: "transactions_queue"}
+
 	conn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
-	failOnError(err, "Failed to connect to RabbitMQ")
-	chann, err := conn.Channel()
-	failOnError(err, "Failed to open a channel")
+	if err != nil {
+		logger.Logger.Error("Failed to connect to RabbitMQ", "error", err)
+		return nil, err
+	}
+	rabbit.conn = conn
+
+	chann, err := rabbit.conn.Channel()
+	if err != nil {
+		logger.Logger.Error("Failed to open a channel", "error", err)
+		return nil, err
+	}
+	rabbit.chann = chann
+	// transactions_queue
 	queue, err := chann.QueueDeclare(
 		"transactions_queue", // name
 		false,                // durable
@@ -34,18 +43,25 @@ func CreateRabbitMQConnection() *RabbitMQ {
 		false,                // no-wait
 		nil,                  // arguments
 	)
-	failOnError(err, "Failed to declare a queue")
+	if err != nil {
+		logger.Logger.Error("Failed to declare a queue", "error", err)
+		return nil, err
+	}
+	rabbit.queue = queue
 	logger.Logger.Info("RabbitMQ connection established and queue declared: ", "queue_name", queue.Name)
 
-	return &RabbitMQ{conn: conn, chann: chann, QueueName: "transactions_queue"}
+	return rabbit, nil
 }
 
 func (r *RabbitMQ) CloseRabbitMQConnection() {
 	err := r.conn.Close()
-	failOnError(err, "Failed to close RabbitMQ connection")
+	if err != nil {
+		logger.Logger.Error("Failed to close RabbitMQ connection", "error", err)
+	}
+
 }
 
-func (r *RabbitMQ) StartConsumer() {
+func (r *RabbitMQ) StartConsumer(database *database.Database) {
 
 	msgs, err := r.chann.Consume(
 		r.QueueName, // queue
@@ -56,11 +72,14 @@ func (r *RabbitMQ) StartConsumer() {
 		false,       // no-wait
 		nil,         // args
 	)
-	failOnError(err, "Failed to register a consumer")
+	if err != nil {
+		logger.Logger.Error("Failed to register a consumer", "error", err)
+		panic(err)
+	}
 
 	var infinity chan struct{} = make(chan struct{})
 	ctx := context.Background()
-	tp := transaction.CreateTransactionProcessor(ctx)
+	tp := transaction.CreateTransactionProcessor(ctx, database)
 	tp.Start()
 	defer tp.Close()
 	go func() {
@@ -71,10 +90,11 @@ func (r *RabbitMQ) StartConsumer() {
 				logger.Logger.Error("Failed to parse transaction", "error", err)
 				continue
 			}
-			tp.InputChan <- tx
+			tp.InputChan <- &tx
 		}
 	}()
 
 	logger.Logger.Info("RabbitMQ consumer started, waiting for messages...")
 	<-infinity
+
 }

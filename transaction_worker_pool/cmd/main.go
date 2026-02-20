@@ -10,12 +10,20 @@ import (
 func main() {
 
 	logger.CreateLogger()
-	database.InitDb()
+	database, err := database.InitDb()
+	if err != nil {
+		logger.Logger.Error("Failed to initialize database", "error", err)
+		return
+	}
 	defer database.DB.Close()
 	logger.Logger.Info("Starting Transaction Worker Pool")
 
-	rmq := rabbitmq.CreateRabbitMQConnection()
+	rmq, err := rabbitmq.CreateRabbitMQConnection()
+	if err != nil {
+		logger.Logger.Error("Failed to initialize RabbitMQ connection", "error", err)
+		return
+	}
 	defer rmq.CloseRabbitMQConnection()
-	rmq.StartConsumer()
+	rmq.StartConsumer(database)
 
 }

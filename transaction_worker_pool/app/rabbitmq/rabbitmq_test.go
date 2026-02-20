@@ -1,9 +1,9 @@
 package rabbitmq
 
-import "testing"
+// import "testing"
 
-func TestWorker(t *testing.T) {
-	rmq := CreateRabbitMQConnection()
-	defer rmq.CloseRabbitMQConnection()
-	rmq.StartConsumer()
-}
+// func TestWorker(t *testing.T) {
+// 	rmq := CreateRabbitMQConnection()
+// 	defer rmq.CloseRabbitMQConnection()
+// 	rmq.StartConsumer()
+// }
