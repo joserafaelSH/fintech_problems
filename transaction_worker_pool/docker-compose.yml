@@ -8,6 +8,15 @@ services:
     networks:
       - my_bridge
 
+  postgres:
+    image: postgres
+    container_name: postgres-db-transactions
+    environment:
+      POSTGRES_DB: transactions
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
   # prometheus:
   #   image: prom/prometheus
   #   container_name: prometheus

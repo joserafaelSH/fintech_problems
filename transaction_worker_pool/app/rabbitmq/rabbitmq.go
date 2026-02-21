@@ -1,9 +1,6 @@
 package rabbitmq
 
 import (
-	"context"
-
-	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/database"
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/logger"
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/transaction"
 
@@ -61,7 +58,7 @@ func (r *RabbitMQ) CloseRabbitMQConnection() {
 
 }
 
-func (r *RabbitMQ) StartConsumer(database *database.Database) {
+func (r *RabbitMQ) StartConsumer(repo transaction.Repository, tp *transaction.TransactionProcessor) {
 
 	msgs, err := r.chann.Consume(
 		r.QueueName, // queue
@@ -78,8 +75,7 @@ func (r *RabbitMQ) StartConsumer(database *database.Database) {
 	}
 
 	var infinity chan struct{} = make(chan struct{})
-	ctx := context.Background()
-	tp := transaction.CreateTransactionProcessor(ctx, database)
+
 	tp.Start()
 	defer tp.Close()
 	go func() {

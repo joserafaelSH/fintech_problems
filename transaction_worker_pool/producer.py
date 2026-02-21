@@ -18,7 +18,7 @@ def random_transaction():
         "status": random.choice(["PENDING", "COMPLETED", "FAILED"]),
     }
 
-def main():
+def main(max_transactions=100):
     connection = pika.BlockingConnection(
         pika.ConnectionParameters(host=RABBITMQ_HOST)
     )
@@ -29,7 +29,8 @@ def main():
     print("Sending random transactions... Ctrl+C to stop.")
 
     try:
-        while True:
+        count = 0
+        while count < max_transactions:
             tx = random_transaction()
             message = json.dumps(tx)
 
@@ -43,6 +44,7 @@ def main():
             )
 
             print(f"Sent: {message}")
+            count += 1
             #time.sleep(1)
 
     except KeyboardInterrupt:
@@ -52,4 +54,14 @@ def main():
         connection.close()
 
 if __name__ == "__main__":
-    main()
+    # read for command line argument for number of transactions to send
+    import argparse
+    parser = argparse.ArgumentParser(description="Transaction Producer")
+    parser.add_argument("--max", type=int, default=100, help="Maximum number of transactions to send")
+    args = parser.parse_args()
+    print(f"Will send up to {args.max} transactions.")
+    print("Press Ctrl+C to stop the producer.")
+    if not args.max:
+        print("No max transactions specified, running default (100).")
+        args.max = 100
+    main(max_transactions=args.max)

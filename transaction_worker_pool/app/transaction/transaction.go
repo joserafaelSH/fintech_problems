@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/database"
 	"github.com/joserafaelSH/fintech_problems/transaction_worker_pool/app/logger"
 )
 
@@ -21,6 +20,11 @@ const (
 	CompletedStatus   = "completed"
 	FailedStatus      = "failed"
 )
+
+type Repository interface {
+	InsertTransaction(ctx context.Context, tx *Transaction) error
+	GetAllTransactions(ctx context.Context) ([]Transaction, error)
+}
 
 type Transaction struct {
 	ID        string    `json:"id"`
@@ -55,39 +59,16 @@ type TransactionProcessor struct {
 	Cancel     context.CancelFunc
 	wg         sync.WaitGroup
 	listenerWg sync.WaitGroup
-	Db         *database.Database
+	Db         Repository
 }
 
 func (tp *TransactionProcessor) SaveTransaction(ctx context.Context, tx *Transaction) error {
-	insertSQL := `INSERT INTO transactions (id, account_id, amount, asset, created_at, status) VALUES (?, ?, ?, ?, ?, ?)`
-	_, err := tp.Db.DB.ExecContext(ctx, insertSQL, tx.ID, tx.AccountID, tx.Amount, tx.Asset, tx.CreatedAt, tx.Status)
+	err := tp.Db.InsertTransaction(ctx, tx)
 	if err != nil {
 		logger.Logger.Error("Failed to save transaction", "error", err)
 		return err
 	}
 	return nil
-}
-
-func (tp *TransactionProcessor) GetAllTransactions(ctx context.Context) ([]Transaction, error) {
-	rows, err := tp.Db.DB.QueryContext(ctx, "SELECT id, account_id, amount, asset, created_at, status FROM transactions")
-	if err != nil {
-		logger.Logger.Error("Failed to query transactions", "error", err)
-		return nil, err
-	}
-	defer rows.Close()
-
-	var transactions []Transaction
-	for rows.Next() {
-		var tx Transaction
-		err := rows.Scan(&tx.ID, &tx.AccountID, &tx.Amount, &tx.Asset, &tx.CreatedAt, &tx.Status)
-		if err != nil {
-			logger.Logger.Error("Failed to scan transaction row", "error", err)
-			continue
-		}
-		transactions = append(transactions, tx)
-	}
-
-	return transactions, nil
 }
 
 func (t *Transaction) Process(ctx context.Context, r *rand.Rand) error {
@@ -116,7 +97,7 @@ func (t *Transaction) Process(ctx context.Context, r *rand.Rand) error {
 	}
 }
 
-func CreateTransactionProcessor(parent context.Context, db *database.Database) *TransactionProcessor {
+func CreateTransactionProcessor(parent context.Context, repo Repository) *TransactionProcessor {
 	ctx, cancel := context.WithCancel(parent)
 	return &TransactionProcessor{
 		NumWorkers: NumWorkers,
@@ -125,7 +106,7 @@ func CreateTransactionProcessor(parent context.Context, db *database.Database) *
 		ErrorChan:  make(chan *ErrorChannel, ErrorChannelSize),
 		GlobalCtx:  ctx,
 		Cancel:     cancel,
-		Db:         db,
+		Db:         repo,
 	}
 }
 
@@ -133,10 +114,24 @@ func (tp *TransactionProcessor) resultListener() {
 	defer tp.listenerWg.Done()
 	for tx := range tp.ResultChan {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		tp.SaveTransaction(ctx, tx)
+		_ = tp.Db.InsertTransaction(ctx, tx)
 		cancel()
 	}
 
+}
+
+func NewProcessor(parent context.Context, repo Repository, workers int) *TransactionProcessor {
+	ctx, cancel := context.WithCancel(parent)
+
+	return &TransactionProcessor{
+		NumWorkers: workers,
+		InputChan:  make(chan *Transaction, 100),
+		ResultChan: make(chan *Transaction, 100),
+		ErrorChan:  make(chan *ErrorChannel, 100),
+		GlobalCtx:  ctx,
+		Cancel:     cancel,
+		Db:         repo,
+	}
 }
 
 func (tp *TransactionProcessor) errorListener() {
